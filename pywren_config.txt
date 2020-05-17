@@ -1,0 +1,12 @@
+pywren:
+    storage_bucket: <BUCKET_NAME>
+
+ibm_cf:
+    endpoint    : <REGION_ENDPOINT>
+    namespace   : <NAMESPACE>
+    api_key     : <API_KEY>
+
+ibm_cos:
+    endpoint   : <REGION_ENDPOINT>  
+    private_endpoint : <PRIVATE_REGION_ENDPOINT>
+    api_key    : <API_KEY>
