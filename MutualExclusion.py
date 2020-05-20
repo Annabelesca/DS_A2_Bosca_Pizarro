@@ -1,77 +1,106 @@
 import pywren_ibm_cloud as pywren
 import json
 import time
+from datetime import datetime
 
-
-N_SLAVES = 1
+N_SLAVES = 20
 bucketName = 'sdmutualexclusion'
 resultFile = 'result.txt'
+timeSleep = 1
 
+
+"""Funcion que se encarga de coordinar los diferentes slaves a la hora de escribir en el fichero
+Parametros de entrada:
+    id - Parametro reservado que permite la obtencion del iD de la llamada
+    x - 
+    ibm-cos - Cliente de COS ready-to-use
+Retorna:
+    Una lista indicando en que orden se ha dado permiso de escritura a los slaves que lo han solicitado
+"""
 def master(id, x, ibm_cos):
     write_permission_list = []
-    ibm_cos.put_object(Bucket=bucketName, Key=resultFile)
+    ibm_cos.put_object(Bucket=bucketName, Key=resultFile)   #Creamos fichero vacio de resultados, en caso que ya haya uno, lo sobreescribimos
     finished = False
     updated = False
+    hasItems = False
 
-    # 1. Monitor COS bucket each X seconds
-    while (finished == False):
+    while (finished == False):  #Mientras aun no hayamos acabado de procesar todas las peticiones de escritura
+        # 1. Monitorizamos bucket cada X segundos
+        while(hasItems == False):
+            try:
+                objects = ibm_cos.list_objects(Bucket=bucketName, Prefix='p_write_')['Contents']   # 2. Obtenemos lista de peticiones de escritura "p_write_{id}"
+                objects = sorted(objects, key = lambda i: i['LastModified'])    # 3. Ordenamos lista por fecha de modificacion (de más a menos antiguos)
+                hasItems=True   
+            except: 
+                time.sleep(timeSleep)   #En caso que no haya ficheros, esperamos X segundos
+
+        hasItems=False
+        lastUpdate = ibm_cos.head_object(Bucket=bucketName, Key=resultFile)['LastModified'] #Cogemos ultima fecha de modificacion del fichero de resultados
+
+        firstItem = objects.pop(0)   # 4. Obtenemos primer elemento de la lista -> Slavve al que le daremos permiso de escritura
+        toWrite=firstItem['Key'][2:]; toDelete = firstItem['Key']; slaveID=firstItem['Key'][8:]   #Obtenemos nombres del elemento a borrar, añadir y el id del esclavo
+
+        ibm_cos.put_object(Bucket=bucketName, Key=toWrite)      # 5.Escribimos permiso de escritura write_{id} en el COS
+        ibm_cos.delete_object(Bucket=bucketName,Key=toDelete) # 6.1 Borramos peticion de escritura p_write_{id}
+        write_permission_list.append(slaveID) # 6.2 Guardamos ID del esclavo que escribe en la variable que devolveremos
+
+        # 7. Monitorizamos "result.txt" cada X segundos hasta que vemos que se ha actualizado
+        while (updated == False):   
+            newDate = ibm_cos.head_object(Bucket=bucketName, Key=resultFile)['LastModified']
+            if (lastUpdate != newDate): updated=True
+            else: time.sleep(timeSleep)
+        updated=False
+
+        ibm_cos.delete_object(Bucket=bucketName,Key=toWrite) # 7. Borramos permiso de escritura write_{id}
+
         try:
-            objects = ibm_cos.list_objects(Bucket=bucketName, Prefix='p_write_')['Contents']   # 2. List all "p_write_{id}" files - Obtenemos lista ficheros del bucket
-            objects = sorted(objects, key = lambda i: i['LastModified'])    # 3. Order objects by time of creation - Lista ordenada por fecha de modificacion
-            
-            firstItem =objects.pop(0)   # 4. Pop first object of the list "p_write_{id}" - Obtenemos primer elemento de la lista
-            toWrite=firstItem['Key'][2:]; toDelete = firstItem['Key']; slaveID=firstItem['Key'][8:]   #Obtenemos nombres del elemento a borrar, añadir y el id del esclavo
-
-            ibm_cos.put_object(Bucket=bucketName, Key=toWrite)      # 5. Write empty "write_{id}" object into COS - Escribimos permiso de escritura
-            ibm_cos.delete_object(Bucket=bucketName,Key=toDelete) # 6.1 Delete from COS "p_write_{id}" - Borramos peticion de escritura
-            write_permission_list.append('Escribe el esclavo '+slaveID) # 6.2 Save {id} in write_permission_list - Guardamos ID del esclavo que escribe
-            
-            # 7. Monitor "result.json" object each X seconds until it is updated
-            lastUpdate = ibm_cos.head_object(Bucket=bucketName, Key='SX_SSL_GrupL3-D.pcapng')['LastModified']
-            while (updated == False):
-                if (lastUpdate != ibm_cos.head_object(Bucket=bucketName, Key='SX_SSL_GrupL3-D.pcapng')['LastModified']): updated=True
-                else: time.sleep(2)
-
-            # 8. Delete from COS “write_{id}”
-            ibm_cos.delete_object(Bucket=bucketName,Key=toWrite)
-
-            if (len(objects)==0): finished = True # 9. Back to step 1 until no "p_write_{id}" objects in the bucket
-        
+            objects = ibm_cos.list_objects(Bucket=bucketName, Prefix='p_write_')['Contents'] # 7. Comprobamos si hay algun otro objeto en el bucket. Si lo hay -> Paso 1
         except:
-            time.sleep(1) 
+            finished = True
 
     return write_permission_list
 
+
+"""Funcion que se encarga de actualizar un fichero del COS, pidiendo permiso de escritura y esperandolo antes de poder actualizarlo
+Parametros de entrada:
+    id - Parametro reservado que permite la obtencion del iD de la llamada
+    x - 
+    ibm-cos - Cliente de COS ready-to-use
+"""
 def slave(id, x, ibm_cos):
     canWrite = False
-    nFitxer = 'p_write_'+str(id)
+    nFitxer = 'p_write_'+str(id)    
 
-    # 1. Write empty "p_write_{id}" object into COS
+    # 1. Escribimos peticion de escritura para el slave creando ficher "p_write_{id}" en el COS
     ibm_cos.put_object(Bucket=bucketName, Key=nFitxer)
 
-    # 2. Monitor COS bucket each X seconds until it finds a file called "write_{id}"
+    # 2. Monitorizamos el bucket del COS cada X segundos hasta encontrar el fichero de permiso de escritura "write_{id}"
     while(canWrite == False):
-        try: # 3. If write_{id} is in COS: get result.txt, append {id}, and put back to COS result.txt
+        try:    # 3. Si write_{id} esta en el COS: Bajamos fichero "result.txt", lo actualizamos y lo volvemos a subir al COS
             objetu = ibm_cos.get_object(Bucket=bucketName,Key=nFitxer[2:])
-            res = ibm_cos.get_object(Bucket=bucketName,Key=resultFile)['Body'].read()
-            
-            #REVISAR. A PARTIR DE AQUI NO FUNCIONA
-            
-            res=res.append(id)
-            ibm_cos.put_object(Bucket=bucketName, Key=resultFile,Body=json.dumps(res))
-            canWrite=True
+            canWrite = True
         except:
-            time.sleep(2)
+            time.sleep(timeSleep)   #Mientras este fichero no esté, nos esperamos
 
-    # 4. Finish
-    # No need to return anything
+    res = ibm_cos.get_object(Bucket=bucketName,Key=resultFile)['Body'].read()
+    res = (res.decode())+str(id)+'\n'
+
+    ibm_cos.put_object(Bucket=bucketName, Key=resultFile,Body=res)
     
 
 if __name__ == '__main__':
+    
     pw = pywren.ibm_cf_executor()
+
+    i_time=datetime.now()
+
     pw.call_async(master, 0)
     pw.map(slave, range(N_SLAVES))
     write_permission_list = pw.get_result()
+
+    f_time=datetime.now()
+    print('Tiempo de ejecucion de los slaves = '+str(f_time-i_time)+"\n")
+
     print(write_permission_list)
 
     # Get result.txt
