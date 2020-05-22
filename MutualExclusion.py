@@ -2,11 +2,12 @@ import pywren_ibm_cloud as pywren
 import json
 import time
 from datetime import datetime
+import sys
 
-N_SLAVES = 20
+N_SLAVES = 10
 bucketName = 'sdmutualexclusion'
 resultFile = 'result.txt'
-timeSleep = 0.75
+timeSleep = 1
 
 
 """Funcion que se encarga de coordinar los diferentes slaves a la hora de escribir en el fichero
@@ -23,8 +24,9 @@ def master(id, x, ibm_cos):
     finished = False
     updated = False
     hasItems = False
+    i=0
 
-    time.sleep(1)
+    time.sleep(timeSleep)
 
     while (finished == False):  #Mientras aun no hayamos acabado de procesar todas las peticiones de escritura
         # 1. Monitorizamos bucket cada X segundos
@@ -47,18 +49,23 @@ def master(id, x, ibm_cos):
         ibm_cos.delete_object(Bucket=bucketName,Key=toDelete) # 6.1 Borramos peticion de escritura p_write_{id}
         write_permission_list.append(slaveID) # 6.2 Guardamos ID del esclavo que escribe en la variable que devolveremos
 
+        #time.sleep(timeSleep)
+
         # 7. Monitorizamos "result.txt" cada X segundos hasta que vemos que se ha actualizado
         while (updated == False):   
             try:
                 newDate = ibm_cos.head_object(Bucket=bucketName, Key=resultFile)['LastModified']
             except:
                 time.sleep(timeSleep)
+
             if (lastUpdate != newDate): updated=True
             else: time.sleep(timeSleep)
+
         updated=False
 
         ibm_cos.delete_object(Bucket=bucketName,Key=toWrite) # 7. Borramos permiso de escritura write_{id}
 
+        
         try:
             objects = ibm_cos.list_objects(Bucket=bucketName, Prefix='p_write_')['Contents'] # 7. Comprobamos si hay algun otro objeto en el bucket. Si lo hay -> Paso 1
         except:
@@ -83,7 +90,7 @@ def slave(id, x, ibm_cos):
     # 2. Monitorizamos el bucket del COS cada X segundos hasta encontrar el fichero de permiso de escritura "write_{id}"
     while(canWrite == False):
         try:    # 3. Si write_{id} esta en el COS: Bajamos fichero "result.txt", lo actualizamos y lo volvemos a subir al COS
-            objetu = ibm_cos.get_object(Bucket=bucketName,Key=nFitxer[2:])
+            res = ibm_cos.get_object(Bucket=bucketName,Key=nFitxer[2:])
             canWrite = True
         except:
             time.sleep(timeSleep)   #Mientras este fichero no esté, nos esperamos
@@ -94,46 +101,44 @@ def slave(id, x, ibm_cos):
     ibm_cos.put_object(Bucket=bucketName, Key=resultFile,Body=res)
     
 
-"""Funcion que se encarga de vaciar el bucket despues de la ejecucion
-Parametros de entrada:
-    nBucket -  Nombre del bucket a vaciar
-    ibm-cos - Cliente de COS ready-to-use
-Retorna:
-    Contenido del fichero de resultados
-"""
-def resetBucket(nBucket, ibm_cos):
-    result = ibm_cos.get_object(Bucket=nBucket,Key=resultFile)['Body'].read().decode()
-    ibm_cos.delete_object(Bucket=nBucket,Key=resultFile)
-    return result
-
-
-
 if __name__ == '__main__':
     
+    #Comprobamos si usuario nos ha dado parametro extra
+    if (len(sys.argv)>2):       
+        print('Error, como parametro opcional se permite el numero de slaves N (<100). >python MutualExclusion.py N')
+        exit(1)
+
+    #Si nos ha dado parametro extra y es un valor valido (entre 1 y 100), actualizamos el numero de slaves
+    if (len(sys.argv)>1):
+        if(int(sys.argv[1])>0 and int(sys.argv[1])<=100): 
+            print('Numero de slaves cambiado a '+sys.argv[1]+ '\n')
+            N_SLAVES = int(sys.argv[1])
+        else:
+            print('Valor de slaves no valido, se dejan los slaves por defecto.\n')
+
+    print ('Se ejecuta programa con '+str(N_SLAVES)+ ' slaves.\n')
+
     pw = pywren.ibm_cf_executor()
 
-    i_time=datetime.now()
+    i_time=datetime.now()   #Empezamos a cronometrar
 
-    pw.call_async(master, 0)
-    pw.map(slave, range(N_SLAVES))
-    write_permission_list = pw.get_result()
+    pw.call_async(master, 0)    #Llamamos a la funcion master
+    pw.map(slave, range(N_SLAVES))  #Llamamos a las funciones slave
+    write_permission_list = pw.get_result() #Esperamos resultado de las ejecuciones
 
     f_time=datetime.now()
-    print('Tiempo de ejecucion de los slaves = '+str(f_time-i_time)+"\n")
+    print('Tiempo de ejecucion de los slaves = '+str(f_time-i_time)+"\n")   #Printamos tiempo de ejecucion
 
-    print(write_permission_list)
+    print(write_permission_list+"\n")   #Printamos lista que devuelve el master
 
-    pw.call_async(resetBucket, bucketName)
-    result = pw.get_result()
+    ibm_cos = pw.internal_storage.get_client()  #Instanciamos objeto de COS
+    result = ibm_cos.get_object(Bucket=bucketName,Key=resultFile)['Body'].read().decode()   #Obtenemos lista contenida en el fichero "result.txt" del COS
 
+    #Como ahora mismo tenemos un string, hacemos un split para obtener una lista con los id de los slaves
     result = result.split("\n")
-    result.remove("")
+    result.remove("")       
+    print(result)
+
+    #Comparamos listas para ver si la exclusion mutua se cumple
     if (write_permission_list[0] == result):    print("Las dos listas se corresponden. Exclusion mutua correcta.\n")
     else: print("ERROR. Exclusion mutua incorrecta.\n")
-
-
-
-
-
-    # Get result.txt
-    # check if content of result.txt == write_permission_list
