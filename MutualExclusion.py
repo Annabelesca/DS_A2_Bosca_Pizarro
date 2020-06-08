@@ -124,7 +124,7 @@ if __name__ == '__main__':
         if(n>0 and n<=100): print('Numero de slaves cambiado a '+str(n)+ '\n'); N_SLAVES = n
         else: print('Valor de slaves no valido, se dejan los slaves por defecto.\n')
    
-    timeSleep = 1 + (0.015 * N_SLAVES)
+    timeSleep = 1 + (0.005 * N_SLAVES)
     print ('Se ejecuta programa con '+str(N_SLAVES)+ ' slaves.\n')
     print ('El timeSleep que usaremos es de '+str(timeSleep)+"\n")
 
